@@ -1,0 +1,10 @@
+torch
+transformers
+accelerate
+diffusers
+safetensors
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+imageio[ffmpeg]
