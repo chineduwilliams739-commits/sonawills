@@ -1,0 +1,8 @@
+torch
+transformers
+accelerate
+diffusers>=0.35.0
+safetensors
+Pillow
+imageio
+imageio-ffmpeg
