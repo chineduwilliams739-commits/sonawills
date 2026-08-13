@@ -1,14 +1,18 @@
 # SonaWills GPU worker deployment
 
-The GPU worker is intentionally separate from GitHub Pages. It exposes a small HTTP job API and runs the open video model locally on an NVIDIA CUDA machine.
+The application is ready to connect to a real GPU worker. The worker is intentionally separate from GitHub Pages and exposes a small HTTP job API running on an NVIDIA CUDA machine.
 
-## Target
+## Launch contract
 - NVIDIA CUDA GPU with enough VRAM for the selected Wan/LTX configuration
 - Docker + NVIDIA Container Toolkit
 - Python/PyTorch/Diffusers
 - FFmpeg
+- Expose `/health` and `/generate` to the SonaWills backend
 
 ## Free-GPU strategy
-Free notebook GPUs are useful for testing but are not reliable unlimited production backends. Kaggle currently advertises free NVIDIA P100 access with a weekly quota (typically 30 hours or higher depending on demand). Google Colab provides free GPU access but explicitly says resources are not guaranteed or unlimited. Hugging Face ZeroGPU is also quota-based for free users. Therefore SonaWills keeps the worker provider-neutral: a Kaggle/Colab machine can be used for experiments, while a persistent self-hosted GPU can be used when available.
+Free notebook GPUs are useful for testing but are not reliable unlimited production backends. Kaggle, Colab, Lightning, Modal, and similar services may impose quotas, session limits, or availability constraints. SonaWills keeps the worker provider-neutral and never attempts to bypass those limits.
 
-The frontend must never receive a provider secret. Only the backend/worker should hold model credentials or storage credentials.
+## Real inference test
+The next integration test must run a short real clip, verify that an MP4 actually exists, measure wall-clock generation time, and record GPU/model settings. That measurement is required before estimating weekly video capacity.
+
+The frontend must never receive provider secrets. Credentials and worker URLs belong in the backend/deployment environment.
