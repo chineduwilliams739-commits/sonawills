@@ -26,5 +26,11 @@ jobs:
       - name: Install Modal
         run: python -m pip install --upgrade pip modal
 
+      - name: Verify Modal credentials are available
+        run: |
+          test -n "$MODAL_TOKEN_ID" || { echo "MODAL_TOKEN_ID is missing from GitHub Actions secrets"; exit 1; }
+          test -n "$MODAL_TOKEN_SECRET" || { echo "MODAL_TOKEN_SECRET is missing from GitHub Actions secrets"; exit 1; }
+          echo "Modal credentials detected. Values are intentionally not printed."
+
       - name: Deploy Wan2.2 worker
         run: modal deploy server/gpu/modal_app.py
