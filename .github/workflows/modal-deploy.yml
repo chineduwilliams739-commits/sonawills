@@ -1,0 +1,30 @@
+name: Deploy SonaWills GPU Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/gpu/**'
+      - '.github/workflows/modal-deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy-modal:
+    runs-on: ubuntu-latest
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - name: Checkout SonaWills
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Modal
+        run: python -m pip install --upgrade pip modal
+
+      - name: Deploy Wan2.2 worker
+        run: modal deploy server/gpu/modal_app.py
