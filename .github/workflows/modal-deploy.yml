@@ -33,4 +33,4 @@ jobs:
           echo "Modal credentials detected. Values are intentionally not printed."
 
       - name: Deploy Wan2.2 worker
-        run: modal deploy server/gpu/modal_app.py
+        run: modal deploy -m server.gpu.modal_app
