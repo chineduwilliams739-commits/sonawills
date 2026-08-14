@@ -12,6 +12,7 @@ import modal
 APP_NAME = "sonawills-wan22"
 MODEL_DIR = Path("/models/Wan2.2-TI2V-5B")
 OUTPUT_DIR = Path("/outputs")
+GPU_TYPE = "T4"
 
 model_volume = modal.Volume.from_name("sonawills-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=True)
@@ -71,7 +72,7 @@ def _download(url: str, destination: Path) -> None:
 
 @app.function(
     image=image,
-    gpu="L40S",
+    gpu=GPU_TYPE,
     timeout=60 * 30,
     volumes={"/models": model_volume, "/outputs": output_volume},
     retries=1,
@@ -121,6 +122,7 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": 5,
         "fps": 24,
         "model": "Wan2.2-TI2V-5B",
+        "gpu": GPU_TYPE,
     }
 
 
@@ -134,7 +136,7 @@ def web_app():
 
     @api.get("/health")
     async def health():
-        return {"ok": True, "model": "Wan2.2-TI2V-5B", "gpu": "L40S", "gpu_min_vram_gb": 24}
+        return {"ok": True, "model": "Wan2.2-TI2V-5B", "gpu": GPU_TYPE, "gpu_min_vram_gb": 16}
 
     @api.post("/submit")
     async def submit(data: dict[str, Any]):
