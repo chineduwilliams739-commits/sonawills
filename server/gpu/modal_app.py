@@ -13,6 +13,8 @@ APP_NAME = "sonawills-wan22"
 MODEL_DIR = Path("/models/Wan2.2-TI2V-5B")
 OUTPUT_DIR = Path("/outputs")
 GPU_TYPE = "T4"
+DEFAULT_SIZE = "832*480"
+DEFAULT_FRAME_NUM = 81
 
 model_volume = modal.Volume.from_name("sonawills-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=True)
@@ -86,6 +88,8 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     prompt = str(data.get("prompt") or "cinematic music video scene")
     image_url = data.get("image_url")
     audio_url = data.get("audio_url")
+    size = str(data.get("size") or DEFAULT_SIZE)
+    frame_num = int(data.get("frame_num") or DEFAULT_FRAME_NUM)
 
     image_path = None
     if image_url:
@@ -94,7 +98,7 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
 
     command = [
         "python", "/opt/Wan2.2/generate.py", "--task", "ti2v-5B",
-        "--size", "1280*704", "--ckpt_dir", str(MODEL_DIR),
+        "--size", size, "--frame_num", str(frame_num), "--ckpt_dir", str(MODEL_DIR),
         "--offload_model", "True", "--convert_model_dtype", "--t5_cpu",
         "--save_file", str(raw_video), "--prompt", prompt,
     ]
@@ -119,10 +123,11 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
         "status": "done",
         "job_id": job_id,
         "path": str(final_video),
-        "duration_seconds": 5,
+        "duration_seconds": frame_num / 24,
         "fps": 24,
         "model": "Wan2.2-TI2V-5B",
         "gpu": GPU_TYPE,
+        "size": size,
     }
 
 
@@ -136,7 +141,13 @@ def web_app():
 
     @api.get("/health")
     async def health():
-        return {"ok": True, "model": "Wan2.2-TI2V-5B", "gpu": GPU_TYPE, "gpu_min_vram_gb": 16}
+        return {
+            "ok": True,
+            "model": "Wan2.2-TI2V-5B",
+            "gpu": GPU_TYPE,
+            "test_size": DEFAULT_SIZE,
+            "test_frame_num": DEFAULT_FRAME_NUM,
+        }
 
     @api.post("/submit")
     async def submit(data: dict[str, Any]):
