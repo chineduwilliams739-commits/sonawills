@@ -26,9 +26,8 @@ MAX_AUDIO_SECONDS = 300
 model_volume = modal.Volume.from_name("sonawills-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=True)
 
-# Start from an official PyTorch CUDA runtime so Modal does not have to download
-# and install another multi-gigabyte PyTorch wheel during every image build.
-image = (
+# Heavy GPU image: used only by the actual Wan2.2 renderer.
+gpu_image = (
     modal.Image.from_registry("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
     .apt_install("git", "ffmpeg")
     .pip_install(
@@ -47,11 +46,15 @@ image = (
         "numpy>=1.23.5,<2",
         "huggingface_hub",
         "pillow",
-        "fastapi[standard]",
     )
     .run_commands("git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2")
     .env({"PYTHONPATH": "/opt/Wan2.2"})
 )
+
+# Lightweight API image: this must not boot the multi-gigabyte CUDA/Wan image.
+# Keeping HTTP separate makes browser requests reliable and keeps GPU startup
+# completely independent from the upload/status API.
+api_image = modal.Image.debian_slim(python_version="3.11").pip_install("fastapi[standard]")
 
 app = modal.App(name=APP_NAME)
 
@@ -78,7 +81,7 @@ def _run(command: list[str], timeout: int) -> None:
 
 
 @app.function(
-    image=image,
+    image=gpu_image,
     gpu=GPU_TYPES,
     timeout=45 * 60,
     startup_timeout=20 * 60,
@@ -131,9 +134,6 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     _run(command, timeout=40 * 60)
 
     if audio_path:
-        # Loop the generated short cinematic shot to the uploaded song for the
-        # first end-to-end test. The next scene-generation pass can replace the
-        # loop with multiple independently generated shots.
         _run(
             [
                 "ffmpeg",
@@ -167,8 +167,6 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     else:
         raw_video.replace(final_video)
 
-    # Remove uploaded source files after rendering so the output volume does not
-    # grow with every test.
     for child in job_dir.iterdir():
         if child.name not in {"video.mp4"}:
             if child.is_dir():
@@ -190,16 +188,13 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Keep the public API warm so the browser does not receive Modal's proxy-level
-# 503 during a cold start. A proxy-level 503 can surface in browser fetch() as
-# the generic "Failed to fetch" error before FastAPI has a chance to add CORS
-# headers. The GPU work itself remains on the separate generate_clip function.
+# Keep the public API warm independently of the heavy GPU worker.
 @app.function(
-    image=image,
+    image=api_image,
     volumes={"/outputs": output_volume},
     min_containers=1,
     scaledown_window=300,
-    startup_timeout=20 * 60,
+    startup_timeout=120,
 )
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app(requires_proxy_auth=False)
