@@ -19,6 +19,7 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      SONAWILLS_GPU_URL: https://chineduwilliams739-commits--sonawills-wan22-web-app.modal.run
     steps:
       - name: Checkout SonaWills
         uses: actions/checkout@v6
@@ -48,3 +49,22 @@ jobs:
 
       - name: Deploy Wan2.2 worker
         run: python -m modal deploy -m server.gpu.modal_app --strategy recreate
+
+      - name: Smoke test public GPU API
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking $SONAWILLS_GPU_URL/health"
+          for attempt in $(seq 1 30); do
+            status=$(curl -sS -o /tmp/sonawills-health.json -w '%{http_code}' "$SONAWILLS_GPU_URL/health" || true)
+            if [ "$status" = "200" ]; then
+              cat /tmp/sonawills-health.json
+              echo
+              echo "SonaWills GPU API health check passed."
+              exit 0
+            fi
+            echo "Attempt $attempt/30 returned HTTP ${status:-curl-error}; waiting 10s for the public Web Function to become ready..."
+            sleep 10
+          done
+          echo "ERROR: SonaWills GPU API did not become healthy within 5 minutes."
+          exit 1
