@@ -190,7 +190,17 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@app.function(image=image, volumes={"/outputs": output_volume})
+# Keep the public API warm so the browser does not receive Modal's proxy-level
+# 503 during a cold start. A proxy-level 503 can surface in browser fetch() as
+# the generic "Failed to fetch" error before FastAPI has a chance to add CORS
+# headers. The GPU work itself remains on the separate generate_clip function.
+@app.function(
+    image=image,
+    volumes={"/outputs": output_volume},
+    min_containers=1,
+    scaledown_window=300,
+    startup_timeout=20 * 60,
+)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app(requires_proxy_auth=False)
 def web_app():
@@ -215,6 +225,7 @@ def web_app():
     async def health():
         return {
             "ok": True,
+            "service": "SonaWills GPU Worker",
             "model": "Wan2.2-TI2V-5B",
             "gpu": "L4 preferred, T4 fallback",
             "test_size": DEFAULT_SIZE,
