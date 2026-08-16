@@ -18,6 +18,7 @@ function App() {
   const [ratio, setRatio] = useState('16:9');
   const [style, setStyle] = useState('Cinematic');
   const [status, setStatus] = useState('idle');
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
   const [jobId, setJobId] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
@@ -42,6 +43,7 @@ function App() {
   const chooseAudio = (file) => {
     setAudio(file || null);
     setStatus('idle');
+    setProgress(0);
     setError('');
     setVideoUrl('');
   };
@@ -49,6 +51,7 @@ function App() {
   const createVideo = async () => {
     if (!audio || !prompt.trim()) return;
     setStatus('uploading');
+    setProgress(5);
     setError('');
     setVideoUrl('');
 
@@ -67,39 +70,58 @@ function App() {
 
       setJobId(data.job_id);
       setStatus('queued');
+      setProgress(12);
       pollJob(data.call_id, data.job_id);
     } catch (err) {
       setStatus('error');
+      setProgress(0);
       setError(err.message || 'Something went wrong while starting generation.');
     }
   };
 
   const pollJob = async (callId, id) => {
+    let estimatedProgress = 12;
     for (let i = 0; i < 600; i += 1) {
       await new Promise(resolve => setTimeout(resolve, 5000));
       try {
         const response = await fetch(`${GPU_WORKER_URL}/status/${callId}`);
         const data = await response.json();
         if (data.status === 'done') {
+          setProgress(100);
           setStatus('done');
           setVideoUrl(`${GPU_WORKER_URL}/download/${id}`);
           return;
         }
         if (data.status === 'failed') throw new Error(data.error || 'The GPU worker failed.');
+
         setStatus('generating');
+        const backendProgress = Number(data.progress);
+        if (Number.isFinite(backendProgress)) {
+          setProgress(Math.min(99, Math.max(12, backendProgress)));
+        } else {
+          // Until the worker exposes an exact render percentage, show a truthful
+          // estimated progress that never reaches 100% before the MP4 is ready.
+          estimatedProgress = Math.min(92, estimatedProgress + (i < 8 ? 5 : 2));
+          setProgress(estimatedProgress);
+        }
       } catch (err) {
         setStatus('error');
+        setProgress(0);
         setError(err.message || 'Generation failed.');
         return;
       }
     }
     setStatus('error');
+    setProgress(0);
     setError('The generation job took too long to report back. Check Modal logs for the job.');
   };
 
   const statusLabel = {
     idle: 'Ready', uploading: 'Uploading', queued: 'Queued', generating: 'Generating', done: 'Complete', error: 'Error'
   }[status];
+
+  const progressTitle = status === 'done' ? 'Music video ready' : status === 'error' ? 'Generation stopped' : status === 'uploading' ? 'Uploading your project' : status === 'queued' ? 'Waiting for GPU' : status === 'generating' ? 'Wan2.2 is rendering' : 'Generation progress';
+  const progressText = status === 'done' ? 'Your MP4 is ready to preview and download.' : status === 'error' ? 'We could not complete this generation.' : status === 'uploading' ? 'Sending your song and creative inputs to SonaWills.' : status === 'queued' ? 'Your project is safely queued for the GPU worker.' : status === 'generating' ? 'Rendering is underway. The percentage is an estimate until the worker reports exact frame progress.' : 'Your generation progress will appear here.';
 
   return (
     <div className="app">
@@ -140,6 +162,13 @@ function App() {
 
         <section className="panel preview-panel">
           <div className="preview-head"><div><span>DIRECTOR'S VIEW</span><h2>{status === 'done' ? 'Your SonaWills video' : status === 'generating' ? 'GPU generation in progress' : status === 'queued' ? 'Production queued' : 'Your music video'}</h2></div><div className="status">● {statusLabel}</div></div>
+
+          <div className="progress-card" aria-live="polite">
+            <div className="progress-top"><div><span>GENERATION PROGRESS</span><b>{progressTitle}</b></div><strong>{progress}%</strong></div>
+            <div className="progress-track"><div className={`progress-fill ${status === 'done' ? 'complete' : ''}`} style={{width:`${progress}%`}} /></div>
+            <div className="progress-meta"><span>0%</span><span>{progressText}</span><span>100%</span></div>
+          </div>
+
           <div className={`stage ${status !== 'idle' ? 'created' : ''}`}>
             {status === 'done' && videoUrl ? <video controls playsInline src={videoUrl} style={{width:'100%',height:'100%',objectFit:'contain',borderRadius:18}} /> : status === 'error' ? <><div className="orb">!</div><h3>Generation stopped</h3><p>{error}</p></> : status !== 'idle' ? <><div className="orb">✦</div><h3>{status === 'generating' ? 'Wan2.2 is rendering your shot.' : 'Your SonaWills project is queued.'}</h3><p>{targetDuration ? `Target duration: ${formatTime(targetDuration)}.` : ''} Keep this page open while the first real GPU test runs.</p></> : <><div className="play">▶</div><h3>Your cinematic preview will appear here</h3><p>Start with a song, character and creative vision.</p></>}
           </div>
