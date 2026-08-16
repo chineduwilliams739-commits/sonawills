@@ -26,7 +26,6 @@ MAX_AUDIO_SECONDS = 300
 model_volume = modal.Volume.from_name("sonawills-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=True)
 
-# Heavy GPU image: used only by the actual Wan2.2 renderer.
 gpu_image = (
     modal.Image.from_registry("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
     .apt_install("git", "ffmpeg")
@@ -51,11 +50,7 @@ gpu_image = (
     .env({"PYTHONPATH": "/opt/Wan2.2"})
 )
 
-# Lightweight API image: this must not boot the multi-gigabyte CUDA/Wan image.
-# Keeping HTTP separate makes browser requests reliable and keeps GPU startup
-# completely independent from the upload/status API.
 api_image = modal.Image.debian_slim(python_version="3.11").pip_install("fastapi[standard]")
-
 app = modal.App(name=APP_NAME)
 
 
@@ -63,9 +58,7 @@ def _ensure_model() -> None:
     marker = MODEL_DIR / ".ready"
     if marker.exists():
         return
-
     from huggingface_hub import snapshot_download
-
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id="Wan-AI/Wan2.2-TI2V-5B",
@@ -91,104 +84,46 @@ def _run(command: list[str], timeout: int) -> None:
 def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     output_volume.reload()
     _ensure_model()
-
     job_dir = OUTPUT_DIR / "jobs" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     raw_video = job_dir / "raw.mp4"
     final_video = job_dir / "video.mp4"
-
     prompt = str(data.get("prompt") or "cinematic music video scene")
     size = str(data.get("size") or DEFAULT_SIZE)
     frame_num = int(data.get("frame_num") or DEFAULT_FRAME_NUM)
     sample_steps = int(data.get("sample_steps") or DEFAULT_STEPS)
     image_path = data.get("image_path")
     audio_path = data.get("audio_path")
-
     command = [
-        "python",
-        "/opt/Wan2.2/generate.py",
-        "--task",
-        "ti2v-5B",
-        "--size",
-        size,
-        "--frame_num",
-        str(frame_num),
-        "--sample_steps",
-        str(sample_steps),
-        "--sample_shift",
-        "3",
-        "--ckpt_dir",
-        str(MODEL_DIR),
-        "--offload_model",
-        "True",
-        "--convert_model_dtype",
-        "--t5_cpu",
-        "--save_file",
-        str(raw_video),
-        "--prompt",
-        prompt,
+        "python", "/opt/Wan2.2/generate.py", "--task", "ti2v-5B",
+        "--size", size, "--frame_num", str(frame_num),
+        "--sample_steps", str(sample_steps), "--sample_shift", "3",
+        "--ckpt_dir", str(MODEL_DIR), "--offload_model", "True",
+        "--convert_model_dtype", "--t5_cpu", "--save_file", str(raw_video),
+        "--prompt", prompt,
     ]
     if image_path:
         command += ["--image", str(image_path)]
-
     _run(command, timeout=40 * 60)
-
     if audio_path:
-        _run(
-            [
-                "ffmpeg",
-                "-y",
-                "-stream_loop",
-                "-1",
-                "-i",
-                str(raw_video),
-                "-i",
-                str(audio_path),
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-t",
-                str(MAX_AUDIO_SECONDS),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                "-c:a",
-                "aac",
-                "-shortest",
-                str(final_video),
-            ],
-            timeout=10 * 60,
-        )
+        _run([
+            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw_video),
+            "-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0",
+            "-t", str(MAX_AUDIO_SECONDS), "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "23", "-c:a", "aac", "-shortest", str(final_video),
+        ], timeout=10 * 60)
         raw_video.unlink(missing_ok=True)
     else:
         raw_video.replace(final_video)
-
-    for child in job_dir.iterdir():
-        if child.name not in {"video.mp4"}:
-            if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
     output_volume.commit()
-
     return {
-        "status": "done",
-        "job_id": job_id,
-        "path": str(final_video),
-        "duration_seconds": frame_num / 24,
-        "fps": 24,
-        "model": "Wan2.2-TI2V-5B",
-        "gpu": "L4/T4 fallback",
-        "size": size,
-        "sample_steps": sample_steps,
+        "status": "done", "job_id": job_id, "path": str(final_video),
+        "duration_seconds": frame_num / 24, "fps": 24,
+        "model": "Wan2.2-TI2V-5B", "gpu": "L4/T4 fallback",
+        "size": size, "sample_steps": sample_steps,
     }
 
 
-# Keep the public API warm independently of the heavy GPU worker.
 @app.function(
     image=api_image,
     volumes={"/outputs": output_volume},
@@ -206,26 +141,16 @@ def web_app():
     api = FastAPI(title="SonaWills GPU Worker")
     api.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "https://chineduwilliams739-commits.github.io",
-            "http://localhost:5173",
-            "http://localhost:4173",
-        ],
+        allow_origins=["*"],
         allow_credentials=False,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["Content-Length", "Content-Type"],
     )
 
     @api.get("/health")
     async def health():
-        return {
-            "ok": True,
-            "service": "SonaWills GPU Worker",
-            "model": "Wan2.2-TI2V-5B",
-            "gpu": "L4 preferred, T4 fallback",
-            "test_size": DEFAULT_SIZE,
-            "test_frame_num": DEFAULT_FRAME_NUM,
-        }
+        return {"ok": True, "service": "SonaWills GPU Worker", "model": "Wan2.2-TI2V-5B", "gpu": "L4 preferred, T4 fallback", "test_size": DEFAULT_SIZE, "test_frame_num": DEFAULT_FRAME_NUM}
 
     @api.post("/submit")
     async def submit(
@@ -236,36 +161,36 @@ def web_app():
         audio: UploadFile | None = File(default=None),
         character: UploadFile | None = File(default=None),
     ):
-        job_id = uuid.uuid4().hex
-        job_dir = OUTPUT_DIR / "jobs" / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-
-        audio_path = None
-        image_path = None
-        if audio:
-            audio_path = job_dir / "audio"
-            with audio_path.open("wb") as f:
-                while chunk := await audio.read(1024 * 1024):
-                    f.write(chunk)
-        if character:
-            image_path = job_dir / "character.jpg"
-            with image_path.open("wb") as f:
-                while chunk := await character.read(1024 * 1024):
-                    f.write(chunk)
-
-        output_volume.commit()
-        call = await generate_clip.spawn.aio(
-            job_id,
-            {
-                "prompt": prompt,
-                "size": size,
-                "frame_num": max(9, min(frame_num, 121)),
-                "sample_steps": max(8, min(sample_steps, 40)),
-                "audio_path": str(audio_path) if audio_path else None,
-                "image_path": str(image_path) if image_path else None,
-            },
-        )
-        return {"job_id": job_id, "call_id": call.object_id, "status": "queued"}
+        try:
+            job_id = uuid.uuid4().hex
+            job_dir = OUTPUT_DIR / "jobs" / job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = None
+            image_path = None
+            if audio:
+                audio_path = job_dir / "audio"
+                with audio_path.open("wb") as f:
+                    while chunk := await audio.read(1024 * 1024):
+                        f.write(chunk)
+            if character:
+                image_path = job_dir / "character.jpg"
+                with image_path.open("wb") as f:
+                    while chunk := await character.read(1024 * 1024):
+                        f.write(chunk)
+            output_volume.commit()
+            call = await generate_clip.spawn.aio(
+                job_id,
+                {
+                    "prompt": prompt, "size": size,
+                    "frame_num": max(9, min(frame_num, 121)),
+                    "sample_steps": max(8, min(sample_steps, 40)),
+                    "audio_path": str(audio_path) if audio_path else None,
+                    "image_path": str(image_path) if image_path else None,
+                },
+            )
+            return {"job_id": job_id, "call_id": call.object_id, "status": "queued"}
+        except Exception as exc:
+            return JSONResponse({"status": "failed", "error": f"Submit failed: {type(exc).__name__}: {exc}"}, status_code=500)
 
     @api.get("/status/{call_id}")
     async def status(call_id: str):
@@ -279,10 +204,7 @@ def web_app():
         except modal.exception.OutputExpiredError:
             raise HTTPException(status_code=404, detail="Generation result expired")
         except Exception as exc:
-            return JSONResponse(
-                {"status": "failed", "call_id": call_id, "error": str(exc)},
-                status_code=500,
-            )
+            return JSONResponse({"status": "failed", "call_id": call_id, "error": f"Status failed: {type(exc).__name__}: {exc}"}, status_code=500)
 
     @api.get("/download/{job_id}")
     async def download(job_id: str):
