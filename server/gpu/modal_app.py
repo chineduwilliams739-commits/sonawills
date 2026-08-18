@@ -16,9 +16,8 @@ import modal
 APP_NAME = "sonawills-wan22"
 MODEL_DIR = Path("/models/Wan2.2-TI2V-5B")
 OUTPUT_DIR = Path("/outputs")
-# Wan2.2 TI2V-5B needs at least 24 GB VRAM.  T4 (16 GB) was an invalid
-# fallback and caused generation failures even though deployment succeeded.
-# Prefer L40S for headroom, then use 24 GB-class GPUs only as fallbacks.
+# Wan2.2 TI2V-5B needs at least 24 GB VRAM. Prefer L40S for headroom and
+# fall back only to 24 GB-class GPUs; T4 is intentionally excluded.
 GPU_TYPES = ["L40S", "A10", "L4"]
 DEFAULT_SIZE = "832*480"
 DEFAULT_FRAME_NUM = 81
@@ -28,12 +27,28 @@ MAX_AUDIO_SECONDS = 300
 model_volume = modal.Volume.from_name("sonawills-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=True)
 
+# Use a CUDA *devel* image because FlashAttention is compiled during the image
+# build and needs nvcc/CUDA_HOME. The previous PyTorch runtime image did not
+# contain the CUDA toolkit, so the worker could be deployed but the model image
+# could not reliably build its required attention kernel.
 gpu_image = (
-    modal.Image.from_registry("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
-    .apt_install("git", "ffmpeg", "ninja-build")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11"
+    )
+    .entrypoint([])
+    .apt_install("git", "ffmpeg", "ninja-build", "build-essential")
+    .env({"CUDA_HOME": "/usr/local/cuda"})
     .pip_install(
+        "setuptools>=75",
+        "wheel",
+        "packaging",
+        "typing_extensions>=4.12",
+        "torch==2.5.1",
         "torchvision==0.20.1",
         "torchaudio==2.5.1",
+        extra_index_url="https://download.pytorch.org/whl/cu124",
+    )
+    .pip_install(
         "opencv-python-headless>=4.9.0.80",
         "diffusers>=0.31.0,<0.34.0",
         "transformers>=4.49.0,<=4.51.3",
@@ -51,9 +66,11 @@ gpu_image = (
         "pillow",
         "sentencepiece",
     )
-    # Wan2.2 lists flash-attn as a runtime dependency. Install it after the
-    # rest of the stack so it can build against the already-installed torch.
-    .pip_install("flash-attn", extra_options="--no-build-isolation")
+    # Wan2.2 recommends installing FlashAttention last and without build
+    # isolation. Pin a version known to work with the Torch 2.5/CUDA 12.4
+    # stack used here rather than allowing a newer source release to change
+    # the build requirements unexpectedly.
+    .pip_install("flash-attn==2.7.4.post1", extra_options="--no-build-isolation")
     .run_commands("git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2")
     .env({"PYTHONPATH": "/opt/Wan2.2"})
 )
