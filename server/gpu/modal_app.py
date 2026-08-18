@@ -6,7 +6,6 @@ status/download endpoints for the SonaWills GitHub Pages frontend.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -17,7 +16,10 @@ import modal
 APP_NAME = "sonawills-wan22"
 MODEL_DIR = Path("/models/Wan2.2-TI2V-5B")
 OUTPUT_DIR = Path("/outputs")
-GPU_TYPES = ["L4", "T4"]
+# Wan2.2 TI2V-5B needs at least 24 GB VRAM.  T4 (16 GB) was an invalid
+# fallback and caused generation failures even though deployment succeeded.
+# Prefer L40S for headroom, then use 24 GB-class GPUs only as fallbacks.
+GPU_TYPES = ["L40S", "A10", "L4"]
 DEFAULT_SIZE = "832*480"
 DEFAULT_FRAME_NUM = 81
 DEFAULT_STEPS = 20
@@ -28,11 +30,13 @@ output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=Tr
 
 gpu_image = (
     modal.Image.from_registry("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
-    .apt_install("git", "ffmpeg")
+    .apt_install("git", "ffmpeg", "ninja-build")
     .pip_install(
+        "torchvision==0.20.1",
+        "torchaudio==2.5.1",
         "opencv-python-headless>=4.9.0.80",
-        "diffusers==0.33.0",
-        "transformers==4.51.3",
+        "diffusers>=0.31.0,<0.34.0",
+        "transformers>=4.49.0,<=4.51.3",
         "tokenizers>=0.20.3",
         "accelerate>=1.1.1",
         "tqdm",
@@ -45,7 +49,11 @@ gpu_image = (
         "numpy>=1.23.5,<2",
         "huggingface_hub",
         "pillow",
+        "sentencepiece",
     )
+    # Wan2.2 lists flash-attn as a runtime dependency. Install it after the
+    # rest of the stack so it can build against the already-installed torch.
+    .pip_install("flash-attn", extra_options="--no-build-isolation")
     .run_commands("git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2")
     .env({"PYTHONPATH": "/opt/Wan2.2"})
 )
@@ -59,6 +67,7 @@ def _ensure_model() -> None:
     if marker.exists():
         return
     from huggingface_hub import snapshot_download
+
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id="Wan-AI/Wan2.2-TI2V-5B",
@@ -76,8 +85,8 @@ def _run(command: list[str], timeout: int) -> None:
 @app.function(
     image=gpu_image,
     gpu=GPU_TYPES,
-    timeout=45 * 60,
-    startup_timeout=20 * 60,
+    timeout=60 * 60,
+    startup_timeout=30 * 60,
     volumes={"/models": model_volume, "/outputs": output_volume},
     retries=1,
 )
@@ -104,7 +113,7 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     ]
     if image_path:
         command += ["--image", str(image_path)]
-    _run(command, timeout=40 * 60)
+    _run(command, timeout=50 * 60)
     if audio_path:
         _run([
             "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(raw_video),
@@ -119,7 +128,7 @@ def generate_clip(job_id: str, data: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "done", "job_id": job_id, "path": str(final_video),
         "duration_seconds": frame_num / 24, "fps": 24,
-        "model": "Wan2.2-TI2V-5B", "gpu": "L4/T4 fallback",
+        "model": "Wan2.2-TI2V-5B", "gpu": "L40S/A10/L4",
         "size": size, "sample_steps": sample_steps,
     }
 
@@ -150,7 +159,14 @@ def web_app():
 
     @api.get("/health")
     async def health():
-        return {"ok": True, "service": "SonaWills GPU Worker", "model": "Wan2.2-TI2V-5B", "gpu": "L4 preferred, T4 fallback", "test_size": DEFAULT_SIZE, "test_frame_num": DEFAULT_FRAME_NUM}
+        return {
+            "ok": True,
+            "service": "SonaWills GPU Worker",
+            "model": "Wan2.2-TI2V-5B",
+            "gpu": "L40S preferred, A10/L4 fallback",
+            "test_size": DEFAULT_SIZE,
+            "test_frame_num": DEFAULT_FRAME_NUM,
+        }
 
     @api.post("/submit")
     async def submit(
@@ -181,7 +197,8 @@ def web_app():
             call = await generate_clip.spawn.aio(
                 job_id,
                 {
-                    "prompt": prompt, "size": size,
+                    "prompt": prompt,
+                    "size": size,
                     "frame_num": max(9, min(frame_num, 121)),
                     "sample_steps": max(8, min(sample_steps, 40)),
                     "audio_path": str(audio_path) if audio_path else None,
@@ -190,7 +207,10 @@ def web_app():
             )
             return {"job_id": job_id, "call_id": call.object_id, "status": "queued"}
         except Exception as exc:
-            return JSONResponse({"status": "failed", "error": f"Submit failed: {type(exc).__name__}: {exc}"}, status_code=500)
+            return JSONResponse(
+                {"status": "failed", "error": f"Submit failed: {type(exc).__name__}: {exc}"},
+                status_code=500,
+            )
 
     @api.get("/status/{call_id}")
     async def status(call_id: str):
@@ -204,7 +224,10 @@ def web_app():
         except modal.exception.OutputExpiredError:
             raise HTTPException(status_code=404, detail="Generation result expired")
         except Exception as exc:
-            return JSONResponse({"status": "failed", "call_id": call_id, "error": f"Status failed: {type(exc).__name__}: {exc}"}, status_code=500)
+            return JSONResponse(
+                {"status": "failed", "call_id": call_id, "error": f"Status failed: {type(exc).__name__}: {exc}"},
+                status_code=500,
+            )
 
     @api.get("/download/{job_id}")
     async def download(job_id: str):
