@@ -1,8 +1,4 @@
-"""SonaWills Wan2.2 GPU worker on Modal.
-
-The web layer accepts uploads, queues a real Wan2.2 TI2V-5B job, and exposes
-status/download endpoints for the SonaWills GitHub Pages frontend.
-"""
+"""SonaWills Wan2.2 GPU worker on Modal."""
 
 from __future__ import annotations
 
@@ -16,8 +12,6 @@ import modal
 APP_NAME = "sonawills-wan22"
 MODEL_DIR = Path("/models/Wan2.2-TI2V-5B")
 OUTPUT_DIR = Path("/outputs")
-# Wan2.2 TI2V-5B needs at least 24 GB VRAM. Prefer L40S for headroom and
-# fall back only to 24 GB-class GPUs; T4 is intentionally excluded.
 GPU_TYPES = ["L40S", "A10", "L4"]
 DEFAULT_SIZE = "832*480"
 DEFAULT_FRAME_NUM = 81
@@ -27,28 +21,20 @@ MAX_AUDIO_SECONDS = 300
 model_volume = modal.Volume.from_name("sonawills-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("sonawills-outputs", create_if_missing=True)
 
-# Use a CUDA *devel* image because FlashAttention is compiled during the image
-# build and needs nvcc/CUDA_HOME. The previous PyTorch runtime image did not
-# contain the CUDA toolkit, so the worker could be deployed but the model image
-# could not reliably build its required attention kernel.
+# Use the official PyTorch CUDA runtime and a prebuilt FlashAttention wheel.
+# This avoids compiling FlashAttention during the Modal image build, which was
+# the reason the previous deployment could appear configured but never expose
+# a healthy public Web Function.
 gpu_image = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11"
-    )
-    .entrypoint([])
-    .apt_install("git", "ffmpeg", "ninja-build", "build-essential")
-    .env({"CUDA_HOME": "/usr/local/cuda"})
+    modal.Image.from_registry("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
+    .apt_install("git", "ffmpeg")
     .pip_install(
         "setuptools>=75",
         "wheel",
         "packaging",
         "typing_extensions>=4.12",
-        "torch==2.5.1",
         "torchvision==0.20.1",
         "torchaudio==2.5.1",
-        extra_index_url="https://download.pytorch.org/whl/cu124",
-    )
-    .pip_install(
         "opencv-python-headless>=4.9.0.80",
         "diffusers>=0.31.0,<0.34.0",
         "transformers>=4.49.0,<=4.51.3",
@@ -66,11 +52,9 @@ gpu_image = (
         "pillow",
         "sentencepiece",
     )
-    # Wan2.2 recommends installing FlashAttention last and without build
-    # isolation. Pin a version known to work with the Torch 2.5/CUDA 12.4
-    # stack used here rather than allowing a newer source release to change
-    # the build requirements unexpectedly.
-    .pip_install("flash-attn==2.7.4.post1", extra_options="--no-build-isolation")
+    .pip_install(
+        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+    )
     .run_commands("git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2")
     .env({"PYTHONPATH": "/opt/Wan2.2"})
 )
@@ -84,7 +68,6 @@ def _ensure_model() -> None:
     if marker.exists():
         return
     from huggingface_hub import snapshot_download
-
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id="Wan-AI/Wan2.2-TI2V-5B",
@@ -224,10 +207,7 @@ def web_app():
             )
             return {"job_id": job_id, "call_id": call.object_id, "status": "queued"}
         except Exception as exc:
-            return JSONResponse(
-                {"status": "failed", "error": f"Submit failed: {type(exc).__name__}: {exc}"},
-                status_code=500,
-            )
+            return JSONResponse({"status": "failed", "error": f"Submit failed: {type(exc).__name__}: {exc}"}, status_code=500)
 
     @api.get("/status/{call_id}")
     async def status(call_id: str):
@@ -241,10 +221,7 @@ def web_app():
         except modal.exception.OutputExpiredError:
             raise HTTPException(status_code=404, detail="Generation result expired")
         except Exception as exc:
-            return JSONResponse(
-                {"status": "failed", "call_id": call_id, "error": f"Status failed: {type(exc).__name__}: {exc}"},
-                status_code=500,
-            )
+            return JSONResponse({"status": "failed", "call_id": call_id, "error": f"Status failed: {type(exc).__name__}: {exc}"}, status_code=500)
 
     @api.get("/download/{job_id}")
     async def download(job_id: str):
