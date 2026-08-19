@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 
-const GPU_WORKER_URL = 'https://chineduwilliams739-commits--sonawills-wan22-web-app.modal.run';
+const GPU_CONFIG_URL = './gpu-config.json';
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds)) return '—';
@@ -18,14 +18,8 @@ async function readApiResponse(response) {
   return data;
 }
 
-async function checkWorker() {
-  const response = await fetch(`${GPU_WORKER_URL}/health?ts=${Date.now()}`, {
-    method: 'GET', mode: 'cors', cache: 'no-store'
-  });
-  return readApiResponse(response);
-}
-
 function App() {
+  const [gpuUrl, setGpuUrl] = useState('');
   const [audio, setAudio] = useState(null);
   const [audioDuration, setAudioDuration] = useState(null);
   const [characters, setCharacters] = useState([]);
@@ -37,6 +31,13 @@ function App() {
   const [error, setError] = useState('');
   const [jobId, setJobId] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
+
+  useEffect(() => {
+    fetch(`${GPU_CONFIG_URL}?ts=${Date.now()}`, { cache: 'no-store' })
+      .then(readApiResponse)
+      .then(config => setGpuUrl(String(config.url || '').replace(/\/$/, '')))
+      .catch(() => setGpuUrl(''));
+  }, []);
 
   useEffect(() => {
     if (!audio) { setAudioDuration(null); return; }
@@ -59,14 +60,17 @@ function App() {
     setAudio(file || null); setStatus('idle'); setProgress(0); setError(''); setVideoUrl('');
   };
 
+  const checkWorker = async () => {
+    if (!gpuUrl) throw new Error('The free Kaggle GPU worker is not running yet. Start the SonaWills Kaggle worker notebook and try again.');
+    const response = await fetch(`${gpuUrl}/health?ts=${Date.now()}`, { method: 'GET', mode: 'cors', cache: 'no-store' });
+    return readApiResponse(response);
+  };
+
   const createVideo = async () => {
     if (!audio || !prompt.trim()) return;
     setStatus('uploading'); setProgress(5); setError(''); setVideoUrl('');
     try {
-      // Check the lightweight API first. This turns the old opaque browser
-      // "Failed to fetch" into a useful diagnostic if the public endpoint is down.
       await checkWorker();
-
       const body = new FormData();
       body.append('prompt', `${prompt.trim()}. Visual style: ${style}.`);
       body.append('size', ratio === '16:9' ? '832*480' : '480*832');
@@ -75,9 +79,7 @@ function App() {
       body.append('audio', audio);
       if (characters[0]) body.append('character', characters[0]);
 
-      const response = await fetch(`${GPU_WORKER_URL}/submit`, {
-        method: 'POST', mode: 'cors', cache: 'no-store', body
-      });
+      const response = await fetch(`${gpuUrl}/submit`, { method: 'POST', mode: 'cors', cache: 'no-store', body });
       const data = await readApiResponse(response);
       if (!data.job_id || !data.call_id) throw new Error('GPU API responded without a job ID.');
       setJobId(data.job_id); setStatus('queued'); setProgress(12);
@@ -85,10 +87,8 @@ function App() {
     } catch (err) {
       setStatus('error'); setProgress(0);
       if (err instanceof TypeError && /fetch/i.test(err.message)) {
-        setError('SonaWills could not reach the GPU API. Please refresh once and try again; if it persists, the public GPU endpoint is unavailable.');
-      } else {
-        setError(err.message || 'Something went wrong while starting generation.');
-      }
+        setError('SonaWills could not reach the free GPU worker. The Kaggle worker may have stopped or its temporary public connection may have changed.');
+      } else setError(err.message || 'Something went wrong while starting generation.');
     }
   };
 
@@ -97,10 +97,10 @@ function App() {
     for (let i = 0; i < 600; i += 1) {
       await new Promise(resolve => setTimeout(resolve, 5000));
       try {
-        const response = await fetch(`${GPU_WORKER_URL}/status/${callId}?ts=${Date.now()}`, { mode: 'cors', cache: 'no-store' });
+        const response = await fetch(`${gpuUrl}/status/${callId}?ts=${Date.now()}`, { mode: 'cors', cache: 'no-store' });
         const data = await readApiResponse(response);
         if (data.status === 'done') {
-          setProgress(100); setStatus('done'); setVideoUrl(`${GPU_WORKER_URL}/download/${id}`); return;
+          setProgress(100); setStatus('done'); setVideoUrl(`${gpuUrl}/download/${id}`); return;
         }
         if (data.status === 'failed') throw new Error(data.error || 'The GPU worker failed.');
         setStatus('generating');
@@ -109,11 +109,11 @@ function App() {
         else { estimatedProgress = Math.min(92, estimatedProgress + (i < 8 ? 5 : 2)); setProgress(estimatedProgress); }
       } catch (err) {
         setStatus('error'); setProgress(0);
-        setError(err instanceof TypeError ? 'The browser lost contact with the GPU API while checking progress.' : (err.message || 'Generation failed.'));
+        setError(err instanceof TypeError ? 'The browser lost contact with the free GPU worker while checking progress.' : (err.message || 'Generation failed.'));
         return;
       }
     }
-    setStatus('error'); setProgress(0); setError('The generation job took too long to report back. Check the GPU worker logs.');
+    setStatus('error'); setProgress(0); setError('The generation job took too long to report back. Check the Kaggle worker notebook.');
   };
 
   const statusLabel = { idle:'Ready', uploading:'Uploading', queued:'Queued', generating:'Generating', done:'Complete', error:'Error' }[status];
